@@ -12,25 +12,34 @@
     "lint": "eslint src --ext .ts",
     "test": "jest"
   },
-  "keywords": ["mcp", "websocket", "ai", "ftc"],
+  "keywords": [
+    "mcp",
+    "websocket",
+    "ai",
+    "ftc"
+  ],
   "author": "FTC Platform Team",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
-    "ws": "^8.18.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
     "node-fetch": "^3.3.2",
-    "dotenv": "^16.4.5"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jest": "^29.5.12",
     "@types/node": "^20.14.10",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.8.2",
-    "tsx": "^4.19.1",
-    "eslint": "^9.23.0",
     "@typescript-eslint/eslint-plugin": "^8.27.0",
     "@typescript-eslint/parser": "^8.27.0",
+    "eslint": "^9.23.0",
     "jest": "^29.7.0",
-    "@types/jest": "^29.5.12"
+    "tsx": "^4.19.1",
+    "typescript": "^5.8.2"
   },
   "engines": {
     "node": ">=20.0.0"

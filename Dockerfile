@@ -21,15 +21,16 @@ RUN addgroup -g 1001 -S nodejs && \
 RUN chown -R mcp:nodejs /app
 USER mcp
 
-# Expose port for health checks (not used for MCP stdio)
+# Expose HTTP port for MCP server
 EXPOSE 3001
 
 # Set environment
 ENV NODE_ENV=production
+ENV MCP_PORT=3001
 
-# Health check
+# Health check using HTTP endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD node -e "console.log('MCP Server health check passed')" || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
 
 # Start the MCP server
 CMD ["npm", "start"]

@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 
 import { config } from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import { randomUUID } from 'node:crypto';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   type CallToolRequest,
+  isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { VercelApiClient } from './lib/api-client.js';
 
@@ -16,39 +20,45 @@ config();
 /**
  * FTC Platform MCP Server
  * 
- * A standalone MCP server that provides AI tools for the FTC Platform
+ * A standalone HTTP MCP server that provides AI tools for the FTC Platform
  * by proxying requests to the Vercel-hosted REST API endpoints.
  * 
  * This server runs independently from the main Next.js application
  * and can be deployed to services like Fly.io, Railway, or Render
- * that support WebSocket connections for real-time MCP communication.
+ * using HTTP transport for MCP communication.
  */
 class FtcMcpServer {
-  private server: Server;
+  private app: express.Application;
   private apiClient: VercelApiClient;
+  private transports: Map<string, StreamableHTTPServerTransport>;
+  private port: number;
 
   constructor() {
-    // Initialize MCP Server
-    this.server = new Server(
-      {
-        name: "ftc-platform-mcp",
-        version: "1.0.0",
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
+    // Initialize Express app
+    this.app = express();
+    this.app.use(express.json());
+    
+    // Configure CORS with MCP session header exposure
+    this.app.use(cors({
+      origin: '*',
+      exposedHeaders: ['Mcp-Session-Id'],
+      allowedHeaders: ['Content-Type', 'mcp-session-id', 'Authorization'],
+    }));
 
     // Initialize API client for Vercel endpoints
     this.apiClient = new VercelApiClient();
+    
+    // Store transports by session ID
+    this.transports = new Map();
+    
+    // Get port from environment
+    this.port = parseInt(process.env.MCP_PORT || '3001', 10);
 
     // Verify configuration on startup
     this.validateConfiguration();
 
-    // Set up MCP tool handlers
-    this.setupToolHandlers();
+    // Set up HTTP endpoints
+    this.setupHttpEndpoints();
     
     // Set up error handling
     this.setupErrorHandling();
@@ -74,23 +84,6 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
   }
 
   private setupErrorHandling(): void {
-    this.server.onerror = (error) => {
-      console.error("[MCP Server Error]", error);
-    };
-
-    // Graceful shutdown
-    process.on("SIGINT", () => {
-      console.log("\n[MCP Server] Received SIGINT, shutting down gracefully...");
-      void this.server.close();
-      process.exit(0);
-    });
-
-    process.on("SIGTERM", () => {
-      console.log("\n[MCP Server] Received SIGTERM, shutting down gracefully...");
-      void this.server.close();
-      process.exit(0);
-    });
-
     // Handle uncaught errors
     process.on('uncaughtException', (error) => {
       console.error('[MCP Server] Uncaught Exception:', error);
@@ -103,9 +96,122 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
     });
   }
 
-  private setupToolHandlers(): void {
+  private async shutdown(): Promise<void> {
+    console.log('\n[MCP Server] Shutting down gracefully...');
+    
+    // Close all active transports
+    for (const [sessionId, transport] of this.transports.entries()) {
+      console.log(`[MCP Server] Closing session: ${sessionId}`);
+      await transport.close();
+    }
+    this.transports.clear();
+    
+    // Close HTTP server
+    return new Promise((resolve) => {
+      this.httpServer?.close(() => {
+        console.log('[MCP Server] HTTP server closed');
+        resolve();
+      });
+    });
+  }
+
+  private createMcpServer(): Server {
+    const server = new Server(
+      {
+        name: "ftc-platform-mcp",
+        version: "1.0.0",
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    this.setupToolHandlers(server);
+    return server;
+  }
+
+  private setupHttpEndpoints(): void {
+    // Health check endpoint
+    this.app.get('/health', (req, res) => {
+      const status = this.apiClient.getStatus();
+      res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        server: 'ftc-platform-mcp',
+        version: '1.0.0',
+        apiClient: status,
+        activeSessions: this.transports.size
+      });
+    });
+
+    // Main MCP endpoint
+    this.app.all('/mcp', async (req, res) => {
+      try {
+        const sessionId = req.headers['mcp-session-id'] as string;
+        let transport = sessionId ? this.transports.get(sessionId) : undefined;
+
+        if (!transport && req.method === 'POST' && isInitializeRequest(req.body)) {
+          // Create new transport for initialization request
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (newSessionId: string) => {
+              if (transport) {
+                this.transports.set(newSessionId, transport);
+              }
+            }
+          });
+
+          transport.onclose = () => {
+            if (transport?.sessionId) {
+              this.transports.delete(transport.sessionId);
+            }
+          };
+
+          const server = this.createMcpServer();
+          await server.connect(transport);
+        } else if (!transport && sessionId) {
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: { 
+              code: -32000, 
+              message: 'Invalid session ID or session expired' 
+            },
+            id: null,
+          });
+          return;
+        } else if (!transport) {
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: { 
+              code: -32000, 
+              message: 'No session ID provided. Initialize first.' 
+            },
+            id: null,
+          });
+          return;
+        }
+
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        console.error('[MCP Server] Request handling error:', error);
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { 
+            code: -32603, 
+            message: 'Internal error',
+            data: error instanceof Error ? error.message : 'Unknown error'
+          },
+          id: null,
+        });
+      }
+    });
+  }
+
+  private setupToolHandlers(server: Server): void {
     // Register available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
         tools: [
           {
@@ -178,7 +284,7 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
     });
 
     // Handle tool execution
-    this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
       const { name, arguments: args } = request.params;
 
       try {
@@ -296,14 +402,30 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
     });
   }
 
+  private httpServer?: import('http').Server;
+
   async start(): Promise<void> {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    
-    console.log("[FTC Platform MCP Server] Started successfully");
-    console.log("- Protocol: MCP over stdio");
-    console.log("- Ready to receive tool calls from Claude AI");
-    console.log("- API Proxy Target:", this.apiClient.getStatus().baseUrl);
+    this.httpServer = this.app.listen(this.port, () => {
+      console.log(`[FTC Platform MCP Server] Started successfully`);
+      console.log(`- Protocol: HTTP/SSE on port ${this.port}`);
+      console.log(`- Health check: http://localhost:${this.port}/health`);
+      console.log(`- MCP endpoint: http://localhost:${this.port}/mcp`);
+      console.log(`- API Proxy Target: ${this.apiClient.getStatus().baseUrl}`);
+      console.log('- Ready to receive MCP connections from Claude AI');
+    });
+
+    // Set up graceful shutdown
+    process.on('SIGINT', async () => {
+      console.log('\n[MCP Server] Received SIGINT');
+      await this.shutdown();
+      process.exit(0);
+    });
+
+    process.on('SIGTERM', async () => {
+      console.log('\n[MCP Server] Received SIGTERM');
+      await this.shutdown();
+      process.exit(0);
+    });
   }
 }
 

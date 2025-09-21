@@ -10,12 +10,16 @@ This is a Model Context Protocol (MCP) server for the FTC Platform that provides
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Claude AI     │───▶│  MCP Server     │───▶│  Vercel API     │
-│   (MCP Client)  │    │  (This App)     │    │  (ftc-platform) │
+│   Claude AI     │───▶│  HTTP MCP       │───▶│  Vercel API     │
+│   (MCP Client)  │    │  Server         │    │  (ftc-platform) │
+│                 │    │  (This App)     │    │                 │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+    HTTP/SSE              Express.js              REST API
+   JSON-RPC              Port 3001             Bearer Auth
 ```
 
-The MCP server acts as a proxy between Claude AI and the FTC Platform's REST API endpoints, providing structured tools for AI analysis of applications and evaluations.
+The MCP server runs as an HTTP service using Server-Sent Events (SSE) transport, acting as a proxy between Claude AI and the FTC Platform's REST API endpoints.
 
 ## Development Commands
 
@@ -68,13 +72,18 @@ Required environment variables:
 
 Copy `.env.example` to `.env` and fill in the values for local development.
 
+Additional HTTP server variables:
+- `MCP_PORT` - Port for HTTP server (default: 3001)
+- `MCP_CLIENT_TOKEN` - Optional client authentication token
+
 ## Technology Stack
 
 - **Runtime**: Node.js 20+ with ES modules
 - **Language**: TypeScript with strict mode
-- **MCP SDK**: @modelcontextprotocol/sdk for protocol implementation  
+- **HTTP Server**: Express.js with CORS support
+- **MCP SDK**: @modelcontextprotocol/sdk with StreamableHTTPServerTransport
 - **HTTP Client**: node-fetch for API requests
-- **Communication**: stdio transport for MCP protocol
+- **Communication**: HTTP/SSE transport for MCP protocol
 
 ## API Integration
 
@@ -98,12 +107,45 @@ The server is designed for deployment to services that support long-lived proces
 - **Docker** - Dockerfile included for containerization
 - **Railway/Render** - Alternative deployment options
 
+## Server Endpoints
+
+- **Health Check**: `GET /health` - Server status and API connectivity
+- **MCP Protocol**: `POST /mcp` - Main endpoint for MCP communication
+- **Session Management**: Uses `mcp-session-id` header for stateful connections
+
 ## Testing the Server
 
 ```bash
-# Test via stdio (development)
-echo '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | npm run dev
+# Start development server
+npm run dev
+# Server starts on http://localhost:3001
 
-# Test connection tool
-echo '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "test_connection", "arguments": {}}}' | npm run dev
+# Test health endpoint
+curl http://localhost:3001/health
+
+# Test MCP initialization (creates new session)
+curl -X POST http://localhost:3001/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1.0.0"}}}'
+
+# Test tools list (requires session ID from initialization)
+curl -X POST http://localhost:3001/mcp \
+  -H "Content-Type: application/json" \
+  -H "mcp-session-id: YOUR_SESSION_ID" \
+  -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}'
+```
+
+## Claude Configuration
+
+Configure Claude to connect via HTTP instead of stdio:
+
+```json
+{
+  "mcpServers": {
+    "ftc-platform": {
+      "type": "fetch",
+      "url": "https://your-mcp-server.fly.dev/mcp"
+    }
+  }
+}
 ```

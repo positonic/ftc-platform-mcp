@@ -16,7 +16,7 @@ This is a Model Context Protocol (MCP) server for the FTC Platform that provides
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
     HTTP/SSE              Express.js              REST API
-   JSON-RPC              Port 3001             Bearer Auth
+   JSON-RPC              Port 3030             Bearer Auth
 ```
 
 The MCP server runs as an HTTP service using Server-Sent Events (SSE) transport, acting as a proxy between Claude AI and the FTC Platform's REST API endpoints.
@@ -73,17 +73,38 @@ Required environment variables:
 Copy `.env.example` to `.env` and fill in the values for local development.
 
 Additional HTTP server variables:
-- `MCP_PORT` - Port for HTTP server (default: 3001)
-- `MCP_CLIENT_TOKEN` - Optional client authentication token
+- `MCP_PORT` - Port for HTTP server (default: 3030)
+- `MCP_CLIENT_TOKEN` - Optional client authentication token for secure access
+
+## Security Features
+
+The MCP server includes built-in security measures:
+
+### Authentication
+- **Client Token**: Set `MCP_CLIENT_TOKEN` environment variable to enable authentication
+- **Bearer Token**: Clients must send `Authorization: Bearer <token>` header
+- **Graceful Fallback**: If no token configured, accepts all connections (not recommended for production)
+
+### Rate Limiting
+- **IP-based**: 100 requests per 15-minute window per IP address
+- **Standard Headers**: Returns rate limit info in `RateLimit-*` headers
+- **JSON-RPC Errors**: Returns proper error format when limits exceeded
+
+### Production Security Recommendations
+1. **Always set `MCP_CLIENT_TOKEN`** in production environments
+2. **Use strong tokens**: Generate cryptographically secure random tokens
+3. **Network Security**: Deploy behind VPC/firewall when possible
+4. **Monitor Usage**: Check logs and `/health` endpoint regularly
 
 ## Technology Stack
 
 - **Runtime**: Node.js 20+ with ES modules
 - **Language**: TypeScript with strict mode
-- **HTTP Server**: Express.js with CORS support
+- **HTTP Server**: Express.js with CORS support and rate limiting
 - **MCP SDK**: @modelcontextprotocol/sdk with StreamableHTTPServerTransport
 - **HTTP Client**: node-fetch for API requests
 - **Communication**: HTTP/SSE transport for MCP protocol
+- **Security**: express-rate-limit for DoS protection
 
 ## API Integration
 
@@ -118,18 +139,18 @@ The server is designed for deployment to services that support long-lived proces
 ```bash
 # Start development server
 npm run dev
-# Server starts on http://localhost:3001
+# Server starts on http://localhost:3030
 
 # Test health endpoint
-curl http://localhost:3001/health
+curl http://localhost:3030/health
 
 # Test MCP initialization (creates new session)
-curl -X POST http://localhost:3001/mcp \
+curl -X POST http://localhost:3030/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1.0.0"}}}'
 
 # Test tools list (requires session ID from initialization)
-curl -X POST http://localhost:3001/mcp \
+curl -X POST http://localhost:3030/mcp \
   -H "Content-Type: application/json" \
   -H "mcp-session-id: YOUR_SESSION_ID" \
   -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}'
@@ -137,14 +158,30 @@ curl -X POST http://localhost:3001/mcp \
 
 ## Claude Configuration
 
-Configure Claude to connect via HTTP instead of stdio:
+Configure Claude to connect via HTTP with authentication:
 
 ```json
 {
   "mcpServers": {
     "ftc-platform": {
       "type": "fetch",
-      "url": "https://your-mcp-server.fly.dev/mcp"
+      "url": "https://ftc-platform-mcp-production.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer your_client_token_here"
+      }
+    }
+  }
+}
+```
+
+For development without authentication:
+
+```json
+{
+  "mcpServers": {
+    "ftc-platform": {
+      "type": "fetch",
+      "url": "http://localhost:3030/mcp"
     }
   }
 }

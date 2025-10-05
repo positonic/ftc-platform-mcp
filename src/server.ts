@@ -3,6 +3,7 @@
 import { config } from 'dotenv';
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { randomUUID } from 'node:crypto';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -45,6 +46,22 @@ class FtcMcpServer {
       allowedHeaders: ['Content-Type', 'mcp-session-id', 'Authorization'],
     }));
 
+    // Add rate limiting
+    const limiter = rateLimit({
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      max: 100, // limit each IP to 100 requests per windowMs
+      message: {
+        jsonrpc: '2.0',
+        error: { 
+          code: -32000, 
+          message: 'Too many requests. Please try again later.' 
+        },
+        id: null,
+      },
+      standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+      legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    });
+
     // Initialize API client for Vercel endpoints
     this.apiClient = new VercelApiClient();
     
@@ -58,7 +75,7 @@ class FtcMcpServer {
     this.validateConfiguration();
 
     // Set up HTTP endpoints
-    this.setupHttpEndpoints();
+    this.setupHttpEndpoints(limiter);
     
     // Set up error handling
     this.setupErrorHandling();
@@ -77,9 +94,12 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
       `.trim());
     }
 
+    const hasClientToken = !!process.env.MCP_CLIENT_TOKEN;
+    
     console.log(`[MCP Server] Configuration valid:
 - API Base URL: ${status.baseUrl}
 - API Key: ${'*'.repeat(8)} (configured)
+- Client Authentication: ${hasClientToken ? 'enabled' : 'disabled (public access)'}
 - Environment: ${process.env.NODE_ENV ?? 'development'}`);
   }
 
@@ -132,7 +152,32 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
     return server;
   }
 
-  private setupHttpEndpoints(): void {
+  private setupHttpEndpoints(limiter: any): void {
+    // Authentication middleware for MCP endpoint
+    const authenticateClient = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      const clientToken = process.env.MCP_CLIENT_TOKEN;
+      
+      // Skip authentication if no token is configured
+      if (!clientToken) {
+        return next();
+      }
+
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+      if (!token || token !== clientToken) {
+        return res.status(401).json({
+          jsonrpc: '2.0',
+          error: { 
+            code: -32000, 
+            message: 'Invalid or missing client authentication token' 
+          },
+          id: null,
+        });
+      }
+
+      next();
+    };
     // Health check endpoint
     this.app.get('/health', (req, res) => {
       const status = this.apiClient.getStatus();
@@ -146,8 +191,8 @@ Please ensure VERCEL_API_BASE_URL and MASTRA_API_KEY are set in your environment
       });
     });
 
-    // Main MCP endpoint
-    this.app.all('/mcp', async (req, res) => {
+    // Main MCP endpoint with rate limiting and authentication
+    this.app.all('/mcp', limiter, authenticateClient, async (req, res) => {
       try {
         const sessionId = req.headers['mcp-session-id'] as string;
         let transport = sessionId ? this.transports.get(sessionId) : undefined;
